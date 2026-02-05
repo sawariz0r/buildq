@@ -2,6 +2,7 @@
   "name": "@prpldev/buildq",
   "version": "0.1.0",
   "type": "module",
+  "files": ["dist"],
   "bin": {
     "buildq": "./dist/bin.js"
   },
@@ -18,8 +19,7 @@
     "commander": "^12",
     "eventsource": "^2",
     "nanoid": "^5",
-    "tar": "^7",
-    "@buildq/shared": "workspace:*"
+    "tar": "^7"
   },
   "devDependencies": {
     "tsx": "^4",
