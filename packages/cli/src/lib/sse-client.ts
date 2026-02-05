@@ -73,6 +73,12 @@ function createSSEConnection(url: string, token: string): SSEConnection {
     });
   }
 
+  // Heartbeat events reset the connection tracker without parsing data
+  es.addEventListener('heartbeat', () => {
+    lastConnectedAt = Date.now();
+    unreachableWarned = false;
+  });
+
   es.onerror = (err) => {
     const error = new Error(err.message ?? 'SSE connection error');
     for (const handler of errorHandlers) {
