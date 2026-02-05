@@ -135,6 +135,18 @@ export const runnerCommand = new Command('runner')
         await tar.extract({ file: tarballPath, cwd: projectDir });
         console.log(dim('\u2192 Extracted project'));
 
+        // Initialize a synthetic git repo so EAS build --local doesn't fail
+        {
+          const { execSync } = await import('node:child_process');
+          execSync('git init', { cwd: projectDir, stdio: 'ignore' });
+          execSync('git add -A', { cwd: projectDir, stdio: 'ignore' });
+          execSync(
+            'git -c user.name="buildq" -c user.email="buildq@local" commit -m "buildq: synthetic commit for remote build"',
+            { cwd: projectDir, stdio: 'ignore' },
+          );
+          console.log(dim('\u2192 Initialized synthetic git repo'));
+        }
+
         // Install dependencies
         const pm = detectPackageManager(projectDir);
         console.log(dim(`\u2192 Installing dependencies with ${pm}...`));
