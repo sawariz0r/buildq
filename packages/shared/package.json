@@ -6,8 +6,8 @@
   "types": "./dist/types.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/types.js",
-      "types": "./dist/types.d.ts"
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
     }
   },
   "scripts": {
