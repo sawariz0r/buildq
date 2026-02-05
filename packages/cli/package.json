@@ -1,0 +1,29 @@
+{
+  "name": "@prpldev/buildq",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "buildq": "./dist/bin.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "tsx src/bin.ts",
+    "build": "tsc",
+    "start": "node dist/bin.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12",
+    "eventsource": "^2",
+    "nanoid": "^5",
+    "tar": "^7",
+    "@buildq/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4",
+    "typescript": "^5",
+    "@types/node": "^20"
+  }
+}
