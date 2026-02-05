@@ -27,6 +27,9 @@ importers:
         specifier: ^7
         version: 7.5.7
     devDependencies:
+      '@buildq/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@types/node':
         specifier: ^20
         version: 20.19.31
