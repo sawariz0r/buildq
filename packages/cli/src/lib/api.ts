@@ -38,6 +38,8 @@ export interface ApiClient {
 
   pushLogs(jobId: string, stream: 'stdout' | 'stderr', data: string): Promise<void>;
 
+  pushStep(jobId: string, step: string): Promise<void>;
+
   uploadArtifact(jobId: string, filePath: string): Promise<void>;
 
   downloadArtifact(jobId: string, destPath: string): Promise<string>;
@@ -219,6 +221,10 @@ export function createApiClient(config: { server: string; token: string }): ApiC
 
     async pushLogs(jobId, stream, data) {
       await jsonRequest<void>('POST', `/jobs/${jobId}/logs`, { stream, data });
+    },
+
+    async pushStep(jobId, step) {
+      await jsonRequest<void>('POST', `/jobs/${jobId}/step`, { step });
     },
 
     async uploadArtifact(jobId, filePath) {

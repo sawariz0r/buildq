@@ -17,6 +17,7 @@ const dim = (s: string) => (noColor ? s : `\x1b[2m${s}\x1b[0m`);
 const yellow = (s: string) => (noColor ? s : `\x1b[33m${s}\x1b[0m`);
 
 const RUNNER_ID_PATH = path.join(os.homedir(), '.config', 'buildq', 'runner-id');
+const POLL_INTERVAL_MS = 30_000;
 
 function loadOrCreateRunnerId(): string {
   try {
@@ -33,6 +34,11 @@ function detectPackageManager(projectDir: string): string {
   if (fs.existsSync(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm';
   if (fs.existsSync(path.join(projectDir, 'yarn.lock'))) return 'yarn';
   return 'npm';
+}
+
+function tailLines(text: string, n: number): string {
+  const lines = text.split('\n').filter(Boolean);
+  return lines.slice(-n).join('\n');
 }
 
 export const runnerCommand = new Command('runner')
@@ -116,26 +122,37 @@ export const runnerCommand = new Command('runner')
     let currentBuild: { child?: ReturnType<typeof spawn>; jobId?: string } = {};
     let shuttingDown = false;
 
+    // Helper to send step events (fire-and-forget)
+    function sendStep(jobId: string, step: string): void {
+      api.pushStep(jobId, step).catch(() => {});
+    }
+
     // Process a single job
     async function processJob(job: Job): Promise<void> {
       const jobDir = path.join(workDir, job.id);
       const projectDir = path.join(jobDir, 'project');
       fs.mkdirSync(projectDir, { recursive: true });
 
+      // Track output across all phases for error context
+      let lastOutput = '';
+
       console.log(`\n\u2192 Processing job ${job.id} (${job.platform}, ${job.profile})`);
       currentBuild.jobId = job.id;
 
       try {
         // Download tarball
+        sendStep(job.id, 'downloading_tarball');
         const tarballPath = path.join(jobDir, 'source.tar.gz');
         await api.downloadTarball(job.id, tarballPath);
         console.log(dim('\u2192 Downloaded tarball'));
 
         // Extract
+        sendStep(job.id, 'extracting');
         await tar.extract({ file: tarballPath, cwd: projectDir });
         console.log(dim('\u2192 Extracted project'));
 
         // Initialize a synthetic git repo so EAS build --local doesn't fail
+        sendStep(job.id, 'git_init');
         {
           const { execSync } = await import('node:child_process');
           execSync('git init', { cwd: projectDir, stdio: 'ignore' });
@@ -148,6 +165,7 @@ export const runnerCommand = new Command('runner')
         }
 
         // Install dependencies
+        sendStep(job.id, 'installing_deps');
         const pm = detectPackageManager(projectDir);
         console.log(dim(`\u2192 Installing dependencies with ${pm}...`));
         await new Promise<void>((resolve, reject) => {
@@ -167,10 +185,14 @@ export const runnerCommand = new Command('runner')
           };
 
           child.stdout?.on('data', (data: Buffer) => {
-            logBuffer += data.toString();
+            const str = data.toString();
+            logBuffer += str;
+            lastOutput += str;
           });
           child.stderr?.on('data', (data: Buffer) => {
-            logBuffer += data.toString();
+            const str = data.toString();
+            logBuffer += str;
+            lastOutput += str;
           });
 
           const flushInterval = setInterval(() => flushLogs('stdout'), 500);
@@ -189,6 +211,7 @@ export const runnerCommand = new Command('runner')
         });
 
         // Update status to building
+        sendStep(job.id, 'building');
         await api.updateJobStatus(job.id, 'building');
         console.log('\u2192 Build started');
 
@@ -211,7 +234,6 @@ export const runnerCommand = new Command('runner')
           currentBuild.child = child;
 
           let logBuffer = '';
-          let lastOutput = '';
 
           const flushLogs = async () => {
             if (logBuffer) {
@@ -252,8 +274,12 @@ export const runnerCommand = new Command('runner')
         });
 
         if (exitCode !== 0) {
+          const tail = tailLines(lastOutput, 20);
+          const errorMsg = tail
+            ? `Build failed (exit code ${exitCode})\n${tail}`
+            : `Build failed (exit code ${exitCode})`;
           await api.updateJobStatus(job.id, 'error', {
-            error: 'Build process failed',
+            error: errorMsg,
             exitCode,
           });
           console.log(red(`\u2717 Build failed (exit code ${exitCode})`));
@@ -261,6 +287,7 @@ export const runnerCommand = new Command('runner')
         }
 
         // Find artifact
+        sendStep(job.id, 'uploading_artifact');
         const artifactExtensions = ['.apk', '.aab', '.ipa', '.tar.gz'];
         let artifactPath: string | null = null;
 
@@ -313,9 +340,13 @@ export const runnerCommand = new Command('runner')
         }
       } catch (err) {
         console.error(red(`\u2717 Error processing job ${job.id}: ${(err as Error).message}`));
+        const tail = tailLines(lastOutput, 20);
+        const errorMsg = tail
+          ? `${(err as Error).message}\n${tail}`
+          : (err as Error).message;
         try {
           await api.updateJobStatus(job.id, 'error', {
-            error: (err as Error).message,
+            error: errorMsg,
             exitCode: 1,
           });
         } catch {}
@@ -341,6 +372,13 @@ export const runnerCommand = new Command('runner')
         processing = true;
         await processJob(result.job);
         processing = false;
+
+        // Re-claim: immediately try for next job after completing one
+        if (!shuttingDown) {
+          for (const p of platforms) {
+            tryClaimJob(p);
+          }
+        }
       } catch (err) {
         processing = false;
         console.warn(yellow(`\u26a0 Claim attempt failed: ${(err as Error).message}`));
@@ -360,6 +398,14 @@ export const runnerCommand = new Command('runner')
       tryClaimJob(platform);
     }
 
+    // Periodic polling fallback — catches jobs missed by SSE
+    const pollInterval = setInterval(() => {
+      if (processing || shuttingDown) return;
+      for (const platform of platforms) {
+        tryClaimJob(platform);
+      }
+    }, POLL_INTERVAL_MS);
+
     // Graceful shutdown
     let forceCount = 0;
     const shutdown = async () => {
@@ -377,6 +423,7 @@ export const runnerCommand = new Command('runner')
       }
 
       clearInterval(heartbeatInterval);
+      clearInterval(pollInterval);
 
       // Wait for current build if one is running
       while (processing) {

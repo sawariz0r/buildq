@@ -4,17 +4,21 @@ import type { SSEEvent } from '@buildq/shared';
 type SSEEventHandler = (event: SSEEvent) => void;
 type SSEErrorHandler = (error: Error) => void;
 
+export type ConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+type StateChangeHandler = (state: ConnectionState) => void;
+
 export interface SSEConnection {
   on(event: string, handler: SSEEventHandler): SSEConnection;
   on(event: 'error', handler: SSEErrorHandler): SSEConnection;
   on(event: 'open', handler: () => void): SSEConnection;
+  on(event: 'stateChange', handler: StateChangeHandler): SSEConnection;
   close(): void;
 }
 
-const UNREACHABLE_WARNING_MS = 60_000;
+const DISCONNECTED_THRESHOLD_MS = 60_000;
 
 /** Named SSE events the server sends */
-const SSE_EVENT_NAMES = ['job:status', 'job:log', 'job:artifact', 'job:created'] as const;
+const SSE_EVENT_NAMES = ['job:status', 'job:log', 'job:artifact', 'job:created', 'job:step'] as const;
 
 function createSSEConnection(url: string, token: string): SSEConnection {
   const es = new EventSource(url, {
@@ -26,25 +30,31 @@ function createSSEConnection(url: string, token: string): SSEConnection {
   const namedHandlers = new Map<string, SSEEventHandler[]>();
   const errorHandlers: SSEErrorHandler[] = [];
   const openHandlers: Array<() => void> = [];
+  const stateChangeHandlers: StateChangeHandler[] = [];
 
   let lastConnectedAt: number = Date.now();
-  let unreachableWarned = false;
-  let unreachableTimer: ReturnType<typeof setInterval> | null = null;
+  let currentState: ConnectionState = 'connected';
+  let stateTimer: ReturnType<typeof setInterval> | null = null;
 
-  // Track connection state for 60s unreachable warning
-  unreachableTimer = setInterval(() => {
+  function emitState(state: ConnectionState) {
+    if (state === currentState) return;
+    currentState = state;
+    for (const handler of stateChangeHandlers) {
+      handler(state);
+    }
+  }
+
+  // Check for disconnected state periodically
+  stateTimer = setInterval(() => {
     const elapsed = Date.now() - lastConnectedAt;
-    if (elapsed >= UNREACHABLE_WARNING_MS && !unreachableWarned) {
-      unreachableWarned = true;
-      console.warn(
-        `[buildq] SSE connection has been unreachable for ${Math.round(elapsed / 1000)}s`,
-      );
+    if (elapsed >= DISCONNECTED_THRESHOLD_MS && currentState !== 'disconnected') {
+      emitState('disconnected');
     }
   }, 10_000);
 
   es.onopen = () => {
     lastConnectedAt = Date.now();
-    unreachableWarned = false;
+    emitState('connected');
     for (const handler of openHandlers) {
       handler();
     }
@@ -54,13 +64,12 @@ function createSSEConnection(url: string, token: string): SSEConnection {
   for (const eventName of SSE_EVENT_NAMES) {
     es.addEventListener(eventName, (evt) => {
       lastConnectedAt = Date.now();
-      unreachableWarned = false;
+      if (currentState !== 'connected') emitState('connected');
 
       let parsed: SSEEvent;
       try {
         parsed = JSON.parse(evt.data ?? '') as SSEEvent;
       } catch {
-        console.warn(`[buildq] Failed to parse SSE event data for "${eventName}", skipping:`, evt.data);
         return;
       }
 
@@ -76,10 +85,11 @@ function createSSEConnection(url: string, token: string): SSEConnection {
   // Heartbeat events reset the connection tracker without parsing data
   es.addEventListener('heartbeat', () => {
     lastConnectedAt = Date.now();
-    unreachableWarned = false;
+    if (currentState !== 'connected') emitState('connected');
   });
 
   es.onerror = (err) => {
+    emitState('reconnecting');
     const error = new Error(err.message ?? 'SSE connection error');
     for (const handler of errorHandlers) {
       handler(error);
@@ -87,13 +97,15 @@ function createSSEConnection(url: string, token: string): SSEConnection {
   };
 
   const connection: SSEConnection = {
-    on(event: string, handler: SSEEventHandler | SSEErrorHandler | (() => void)) {
+    on(event: string, handler: SSEEventHandler | SSEErrorHandler | (() => void) | StateChangeHandler) {
       if (event === 'error') {
         errorHandlers.push(handler as SSEErrorHandler);
       } else if (event === 'open') {
         openHandlers.push(handler as () => void);
+      } else if (event === 'stateChange') {
+        stateChangeHandlers.push(handler as StateChangeHandler);
       } else {
-        // Named event (job:status, job:log, job:artifact, job:created, etc.)
+        // Named event (job:status, job:log, job:artifact, job:created, job:step, etc.)
         if (!namedHandlers.has(event)) {
           namedHandlers.set(event, []);
         }
@@ -104,9 +116,9 @@ function createSSEConnection(url: string, token: string): SSEConnection {
 
     close() {
       es.close();
-      if (unreachableTimer) {
-        clearInterval(unreachableTimer);
-        unreachableTimer = null;
+      if (stateTimer) {
+        clearInterval(stateTimer);
+        stateTimer = null;
       }
     },
   };

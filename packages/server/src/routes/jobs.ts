@@ -125,6 +125,7 @@ jobs.post('/claim', async (c) => {
   sse.broadcastToJob(job.id, 'job:status', {
     jobId: job.id,
     status: 'claimed',
+    hostname: body.hostname || 'unknown',
   });
 
   return c.json({
@@ -198,7 +199,7 @@ jobs.post('/:id/logs', async (c) => {
   if (!job) {
     return c.json({ error: 'Job not found' }, 404);
   }
-  if (job.status !== 'building') {
+  if (job.status !== 'building' && job.status !== 'claimed') {
     return c.json({ error: `Cannot push logs for job in '${job.status}' status` }, 400);
   }
 
@@ -334,6 +335,28 @@ jobs.get('/:id/events', async (c) => {
     // Keep the stream open
     await new Promise(() => {});
   });
+});
+
+// POST /jobs/:id/step — Runner reports current step
+jobs.post('/:id/step', async (c) => {
+  const jobId = c.req.param('id');
+  const job = queue.getJob(jobId);
+
+  if (!job) {
+    return c.json({ error: 'Job not found' }, 404);
+  }
+  if (job.status !== 'claimed' && job.status !== 'building') {
+    return c.json({ error: `Cannot push step for job in '${job.status}' status` }, 400);
+  }
+
+  const body = await c.req.json<{ step: string }>();
+
+  sse.broadcastToJob(jobId, 'job:step', {
+    jobId,
+    step: body.step,
+  });
+
+  return c.body(null, 200);
 });
 
 // POST /jobs/:id/cancel — Cancel a job (used by CLI cancel command)
