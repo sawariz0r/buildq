@@ -68,7 +68,10 @@ function createSSEConnection(url: string, token: string): SSEConnection {
 
       let parsed: SSEEvent;
       try {
-        parsed = JSON.parse(evt.data ?? '') as SSEEvent;
+        const raw = JSON.parse(evt.data ?? '');
+        // Server omits the `type` discriminator — inject it from the SSE event name
+        raw.type = eventName;
+        parsed = raw as SSEEvent;
       } catch {
         return;
       }
@@ -132,7 +135,7 @@ function createSSEConnection(url: string, token: string): SSEConnection {
  */
 export function connectToJob(serverUrl: string, token: string, jobId: string): SSEConnection {
   const baseUrl = serverUrl.replace(/\/+$/, '');
-  const url = `${baseUrl}/jobs/${jobId}/events`;
+  const url = `${baseUrl}/api/jobs/${jobId}/events`;
   return createSSEConnection(url, token);
 }
 
@@ -146,6 +149,6 @@ export function connectToPlatform(
   platform: string,
 ): SSEConnection {
   const baseUrl = serverUrl.replace(/\/+$/, '');
-  const url = `${baseUrl}/events?platform=${platform}`;
+  const url = `${baseUrl}/api/events/${platform}`;
   return createSSEConnection(url, token);
 }

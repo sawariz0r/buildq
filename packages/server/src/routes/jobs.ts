@@ -243,12 +243,8 @@ jobs.post('/:id/artifact', async (c) => {
       Buffer.from(await artifact.arrayBuffer()),
     );
 
-    queue.updateJobStatus(jobId, job.status, {
-      artifactFilename: artifact.name,
-    });
-
-    // Directly set artifactFilename if job is already in success state
     job.artifactFilename = artifact.name;
+    job.updatedAt = Date.now();
 
     sse.broadcastToJob(jobId, 'job:artifact', {
       jobId,

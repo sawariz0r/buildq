@@ -19,6 +19,8 @@ const yellow = (s: string) => (noColor ? s : `\x1b[33m${s}\x1b[0m`);
 const RUNNER_ID_PATH = path.join(os.homedir(), '.config', 'buildq', 'runner-id');
 const POLL_INTERVAL_MS = 30_000;
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 function loadOrCreateRunnerId(): string {
   try {
     return fs.readFileSync(RUNNER_ID_PATH, 'utf-8').trim();
@@ -46,6 +48,7 @@ export const runnerCommand = new Command('runner')
   .requiredOption('-p, --platform <platforms>', 'Comma-separated platforms: ios, android, or ios,android')
   .option('-i, --install', 'Auto-install artifact on device after build', false)
   .option('-w, --work-dir <path>', 'Working directory for builds', path.join(os.homedir(), '.buildq', 'builds'))
+  .option('--dry-run', 'Simulate builds without eas-cli (for testing)', false)
   .action(async (opts, cmd) => {
     const globalOpts = cmd.parent?.opts() ?? {};
 
@@ -68,13 +71,15 @@ export const runnerCommand = new Command('runner')
       process.exit(1);
     }
 
-    // Check eas-cli
-    try {
-      const { execSync } = await import('node:child_process');
-      execSync('eas --version', { stdio: 'ignore' });
-    } catch {
-      console.error(red('\u2717 eas-cli is not installed. Install it with: npm install -g eas-cli'));
-      process.exit(1);
+    // Check eas-cli (skip in dry-run mode)
+    if (!opts.dryRun) {
+      try {
+        const { execSync } = await import('node:child_process');
+        execSync('eas --version', { stdio: 'ignore' });
+      } catch {
+        console.error(red('\u2717 eas-cli is not installed. Install it with: npm install -g eas-cli'));
+        process.exit(1);
+      }
     }
 
     const runnerId = loadOrCreateRunnerId();
@@ -100,6 +105,9 @@ export const runnerCommand = new Command('runner')
     console.log(`\u2192 Hostname: ${hostname}`);
     console.log(`\u2192 Platforms: ${platforms.join(', ')}`);
     console.log(`\u2192 Work directory: ${workDir}`);
+    if (opts.dryRun) {
+      console.log(yellow('\u2192 Dry-run mode: builds will be simulated without eas-cli'));
+    }
 
     // Initial heartbeat
     try {
@@ -128,7 +136,7 @@ export const runnerCommand = new Command('runner')
     }
 
     // Process a single job
-    async function processJob(job: Job): Promise<void> {
+    async function processJob(job: Job, dryRun: boolean): Promise<void> {
       const jobDir = path.join(workDir, job.id);
       const projectDir = path.join(jobDir, 'project');
       fs.mkdirSync(projectDir, { recursive: true });
@@ -151,191 +159,253 @@ export const runnerCommand = new Command('runner')
         await tar.extract({ file: tarballPath, cwd: projectDir });
         console.log(dim('\u2192 Extracted project'));
 
-        // Initialize a synthetic git repo so EAS build --local doesn't fail
-        sendStep(job.id, 'git_init');
-        {
-          const { execSync } = await import('node:child_process');
-          execSync('git init', { cwd: projectDir, stdio: 'ignore' });
-          execSync('git add -A', { cwd: projectDir, stdio: 'ignore' });
-          execSync(
-            'git -c user.name="buildq" -c user.email="buildq@local" commit -m "buildq: synthetic commit for remote build"',
-            { cwd: projectDir, stdio: 'ignore' },
-          );
-          console.log(dim('\u2192 Initialized synthetic git repo'));
-        }
+        if (dryRun) {
+          // --- Dry-run simulated build ---
 
-        // Install dependencies
-        sendStep(job.id, 'installing_deps');
-        const pm = detectPackageManager(projectDir);
-        console.log(dim(`\u2192 Installing dependencies with ${pm}...`));
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn(pm, ['install'], {
-            cwd: projectDir,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          });
+          // 1. Simulate git init
+          sendStep(job.id, 'git_init');
+          await api.pushLogs(job.id, 'stdout', 'Initialized empty Git repository (simulated)\n');
+          console.log(dim('\u2192 [dry-run] Simulated git init'));
+          await sleep(300);
 
-          let logBuffer = '';
-          const flushLogs = async (stream: 'stdout' | 'stderr') => {
-            if (logBuffer) {
-              try {
-                await api.pushLogs(job.id, stream, logBuffer);
-              } catch {}
-              logBuffer = '';
-            }
-          };
+          // 2. Simulate installing dependencies
+          sendStep(job.id, 'installing_deps');
+          const depMessages = [
+            'Resolving dependencies...\n',
+            'Fetching packages...\n',
+            'Linking dependencies...\n',
+            'Done in 1.6s (simulated)\n',
+          ];
+          for (const msg of depMessages) {
+            await api.pushLogs(job.id, 'stdout', msg);
+            await sleep(400);
+          }
+          console.log(dim('\u2192 [dry-run] Simulated dependency install'));
 
-          child.stdout?.on('data', (data: Buffer) => {
-            const str = data.toString();
-            logBuffer += str;
-            lastOutput += str;
-          });
-          child.stderr?.on('data', (data: Buffer) => {
-            const str = data.toString();
-            logBuffer += str;
-            lastOutput += str;
-          });
+          // 3. Simulate build
+          sendStep(job.id, 'building');
+          await api.updateJobStatus(job.id, 'building');
+          console.log('\u2192 [dry-run] Simulated build started');
+          const buildMessages = [
+            `Building ${job.platform} (${job.profile})...\n`,
+            'Compiling sources...\n',
+            'Processing assets...\n',
+            'Linking frameworks...\n',
+            'Code signing...\n',
+            'Build completed successfully (simulated)\n',
+          ];
+          for (const msg of buildMessages) {
+            await api.pushLogs(job.id, 'stdout', msg);
+            await sleep(500);
+          }
 
-          const flushInterval = setInterval(() => flushLogs('stdout'), 500);
+          // 4. Create fake artifact and upload via real API
+          sendStep(job.id, 'uploading_artifact');
+          const ext = job.platform === 'ios' ? '.ipa' : '.apk';
+          const artifactName = `build-${job.id}${ext}`;
+          const artifactPath = path.join(jobDir, artifactName);
+          fs.writeFileSync(artifactPath, JSON.stringify({
+            buildq: 'dry-run-artifact',
+            jobId: job.id,
+            platform: job.platform,
+            profile: job.profile,
+            timestamp: new Date().toISOString(),
+          }, null, 2));
+          console.log(`\u2192 [dry-run] Uploading fake artifact: ${artifactName}`);
+          await api.uploadArtifact(job.id, artifactPath);
 
-          child.on('close', (code) => {
-            clearInterval(flushInterval);
-            flushLogs('stdout').then(() => {
-              if (code === 0) resolve();
-              else reject(new Error(`${pm} install failed with exit code ${code}`));
+          // 5. Mark success
+          await api.updateJobStatus(job.id, 'success');
+          console.log(green(`\u2713 [dry-run] Build succeeded for job ${job.id}`));
+        } else {
+          // --- Real build path ---
+
+          // Initialize a synthetic git repo so EAS build --local doesn't fail
+          sendStep(job.id, 'git_init');
+          {
+            const { execSync } = await import('node:child_process');
+            execSync('git init', { cwd: projectDir, stdio: 'ignore' });
+            execSync('git add -A', { cwd: projectDir, stdio: 'ignore' });
+            execSync(
+              'git -c user.name="buildq" -c user.email="buildq@local" commit -m "buildq: synthetic commit for remote build"',
+              { cwd: projectDir, stdio: 'ignore' },
+            );
+            console.log(dim('\u2192 Initialized synthetic git repo'));
+          }
+
+          // Install dependencies
+          sendStep(job.id, 'installing_deps');
+          const pm = detectPackageManager(projectDir);
+          console.log(dim(`\u2192 Installing dependencies with ${pm}...`));
+          await new Promise<void>((resolve, reject) => {
+            const child = spawn(pm, ['install'], {
+              cwd: projectDir,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+
+            let logBuffer = '';
+            const flushLogs = async (stream: 'stdout' | 'stderr') => {
+              if (logBuffer) {
+                try {
+                  await api.pushLogs(job.id, stream, logBuffer);
+                } catch {}
+                logBuffer = '';
+              }
+            };
+
+            child.stdout?.on('data', (data: Buffer) => {
+              const str = data.toString();
+              logBuffer += str;
+              lastOutput += str;
+            });
+            child.stderr?.on('data', (data: Buffer) => {
+              const str = data.toString();
+              logBuffer += str;
+              lastOutput += str;
+            });
+
+            const flushInterval = setInterval(() => flushLogs('stdout'), 500);
+
+            child.on('close', (code) => {
+              clearInterval(flushInterval);
+              flushLogs('stdout').then(() => {
+                if (code === 0) resolve();
+                else reject(new Error(`${pm} install failed with exit code ${code}`));
+              });
+            });
+            child.on('error', (err) => {
+              clearInterval(flushInterval);
+              reject(err);
             });
           });
-          child.on('error', (err) => {
-            clearInterval(flushInterval);
-            reject(err);
+
+          // Update status to building
+          sendStep(job.id, 'building');
+          await api.updateJobStatus(job.id, 'building');
+          console.log('\u2192 Build started');
+
+          // Execute EAS build
+          const buildFlags = [
+            'build',
+            '--local',
+            '--platform', job.platform,
+            '--profile', job.profile,
+            '--non-interactive',
+            ...job.flags,
+          ];
+
+          const exitCode = await new Promise<number>((resolve, reject) => {
+            const child = spawn('eas', buildFlags, {
+              cwd: projectDir,
+              env: { ...process.env },
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            currentBuild.child = child;
+
+            let logBuffer = '';
+
+            const flushLogs = async () => {
+              if (logBuffer) {
+                const toSend = logBuffer;
+                logBuffer = '';
+                try {
+                  await api.pushLogs(job.id, 'stdout', toSend);
+                } catch {}
+              }
+            };
+
+            child.stdout?.on('data', (data: Buffer) => {
+              const str = data.toString();
+              logBuffer += str;
+              lastOutput += str;
+              process.stdout.write(dim(str));
+            });
+
+            child.stderr?.on('data', (data: Buffer) => {
+              const str = data.toString();
+              logBuffer += str;
+              lastOutput += str;
+              process.stderr.write(str);
+            });
+
+            const flushInterval = setInterval(flushLogs, 500);
+
+            child.on('close', (code) => {
+              currentBuild.child = undefined;
+              clearInterval(flushInterval);
+              flushLogs().then(() => resolve(code ?? 1));
+            });
+            child.on('error', (err) => {
+              currentBuild.child = undefined;
+              clearInterval(flushInterval);
+              reject(err);
+            });
           });
-        });
 
-        // Update status to building
-        sendStep(job.id, 'building');
-        await api.updateJobStatus(job.id, 'building');
-        console.log('\u2192 Build started');
+          if (exitCode !== 0) {
+            const tail = tailLines(lastOutput, 20);
+            const errorMsg = tail
+              ? `Build failed (exit code ${exitCode})\n${tail}`
+              : `Build failed (exit code ${exitCode})`;
+            await api.updateJobStatus(job.id, 'error', {
+              error: errorMsg,
+              exitCode,
+            });
+            console.log(red(`\u2717 Build failed (exit code ${exitCode})`));
+            return;
+          }
 
-        // Execute EAS build
-        const buildFlags = [
-          'build',
-          '--local',
-          '--platform', job.platform,
-          '--profile', job.profile,
-          '--non-interactive',
-          ...job.flags,
-        ];
+          // Find artifact
+          sendStep(job.id, 'uploading_artifact');
+          const artifactExtensions = ['.apk', '.aab', '.ipa', '.tar.gz'];
+          let artifactPath: string | null = null;
 
-        const exitCode = await new Promise<number>((resolve, reject) => {
-          const child = spawn('eas', buildFlags, {
-            cwd: projectDir,
-            env: { ...process.env },
-            stdio: ['ignore', 'pipe', 'pipe'],
-          });
-          currentBuild.child = child;
-
-          let logBuffer = '';
-
-          const flushLogs = async () => {
-            if (logBuffer) {
-              const toSend = logBuffer;
-              logBuffer = '';
-              try {
-                await api.pushLogs(job.id, 'stdout', toSend);
-              } catch {}
-            }
+          // Search recursively in project directory for recently created build artifacts
+          const findArtifact = (dir: string): string | null => {
+            try {
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isFile()) {
+                  for (const ext of artifactExtensions) {
+                    if (entry.name.endsWith(ext)) {
+                      return fullPath;
+                    }
+                  }
+                } else if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== '.git') {
+                  const found = findArtifact(fullPath);
+                  if (found) return found;
+                }
+              }
+            } catch {}
+            return null;
           };
 
-          child.stdout?.on('data', (data: Buffer) => {
-            const str = data.toString();
-            logBuffer += str;
-            lastOutput += str;
-            process.stdout.write(dim(str));
-          });
+          artifactPath = findArtifact(projectDir);
 
-          child.stderr?.on('data', (data: Buffer) => {
-            const str = data.toString();
-            logBuffer += str;
-            lastOutput += str;
-            process.stderr.write(str);
-          });
+          if (artifactPath) {
+            console.log(`\u2192 Uploading artifact: ${path.basename(artifactPath)}`);
+            await api.uploadArtifact(job.id, artifactPath);
+          }
 
-          const flushInterval = setInterval(flushLogs, 500);
+          await api.updateJobStatus(job.id, 'success');
+          console.log(green(`\u2713 Build succeeded for job ${job.id}`));
 
-          child.on('close', (code) => {
-            currentBuild.child = undefined;
-            clearInterval(flushInterval);
-            flushLogs().then(() => resolve(code ?? 1));
-          });
-          child.on('error', (err) => {
-            currentBuild.child = undefined;
-            clearInterval(flushInterval);
-            reject(err);
-          });
-        });
-
-        if (exitCode !== 0) {
-          const tail = tailLines(lastOutput, 20);
-          const errorMsg = tail
-            ? `Build failed (exit code ${exitCode})\n${tail}`
-            : `Build failed (exit code ${exitCode})`;
-          await api.updateJobStatus(job.id, 'error', {
-            error: errorMsg,
-            exitCode,
-          });
-          console.log(red(`\u2717 Build failed (exit code ${exitCode})`));
-          return;
-        }
-
-        // Find artifact
-        sendStep(job.id, 'uploading_artifact');
-        const artifactExtensions = ['.apk', '.aab', '.ipa', '.tar.gz'];
-        let artifactPath: string | null = null;
-
-        // Search recursively in project directory for recently created build artifacts
-        const findArtifact = (dir: string): string | null => {
-          try {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of entries) {
-              const fullPath = path.join(dir, entry.name);
-              if (entry.isFile()) {
-                for (const ext of artifactExtensions) {
-                  if (entry.name.endsWith(ext)) {
-                    return fullPath;
-                  }
-                }
-              } else if (entry.isDirectory() && entry.name !== 'node_modules' && entry.name !== '.git') {
-                const found = findArtifact(fullPath);
-                if (found) return found;
+          // Auto-install
+          if (opts.install && artifactPath) {
+            try {
+              if (job.platform === 'ios') {
+                const { execSync } = await import('node:child_process');
+                execSync(`xcrun simctl install booted "${artifactPath}"`, { stdio: 'inherit' });
+                console.log(green('\u2713 Installed on iOS simulator'));
+              } else if (job.platform === 'android') {
+                const { execSync } = await import('node:child_process');
+                execSync(`adb install "${artifactPath}"`, { stdio: 'inherit' });
+                console.log(green('\u2713 Installed on Android device'));
               }
+            } catch (err) {
+              console.warn(yellow(`\u26a0 Auto-install failed: ${(err as Error).message}`));
             }
-          } catch {}
-          return null;
-        };
-
-        artifactPath = findArtifact(projectDir);
-
-        if (artifactPath) {
-          console.log(`\u2192 Uploading artifact: ${path.basename(artifactPath)}`);
-          await api.uploadArtifact(job.id, artifactPath);
-        }
-
-        await api.updateJobStatus(job.id, 'success');
-        console.log(green(`\u2713 Build succeeded for job ${job.id}`));
-
-        // Auto-install
-        if (opts.install && artifactPath) {
-          try {
-            if (job.platform === 'ios') {
-              const { execSync } = await import('node:child_process');
-              execSync(`xcrun simctl install booted "${artifactPath}"`, { stdio: 'inherit' });
-              console.log(green('\u2713 Installed on iOS simulator'));
-            } else if (job.platform === 'android') {
-              const { execSync } = await import('node:child_process');
-              execSync(`adb install "${artifactPath}"`, { stdio: 'inherit' });
-              console.log(green('\u2713 Installed on Android device'));
-            }
-          } catch (err) {
-            console.warn(yellow(`\u26a0 Auto-install failed: ${(err as Error).message}`));
           }
         }
       } catch (err) {
@@ -370,7 +440,7 @@ export const runnerCommand = new Command('runner')
         if (!result) return; // 204 — someone else claimed it
 
         processing = true;
-        await processJob(result.job);
+        await processJob(result.job, opts.dryRun);
         processing = false;
 
         // Re-claim: immediately try for next job after completing one
