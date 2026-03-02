@@ -150,19 +150,21 @@ function checkIOS(): PreflightCheck[] {
     fix: xcrun.ok ? undefined : 'Run: xcode-select --install',
   });
 
-  // CocoaPods
+  // CocoaPods — pod --version may exit non-zero due to LANG warnings
   const pod = probe('pod', ['--version']);
-  if (pod.ok) {
+  const podVersion = pod.output.match(/^(\d+\.\d+[\d.]*)/m)?.[1];
+  if (pod.ok || podVersion) {
     checks.push({
       name: 'CocoaPods',
       status: 'pass',
-      version: pod.output.trim().split('\n')[0],
+      version: podVersion,
     });
   } else {
+    const notFound = pod.output === '' || pod.output.includes('ENOENT') || pod.output.includes('not found');
     checks.push({
       name: 'CocoaPods',
       status: 'fail',
-      message: 'pod command not found',
+      message: notFound ? 'pod command not found' : `pod failed: ${pod.output.slice(0, 100)}`,
       fix: 'Install CocoaPods: sudo gem install cocoapods  or  brew install cocoapods',
     });
   }
@@ -186,10 +188,12 @@ function checkCommon(dryRun: boolean): PreflightCheck[] {
   // eas-cli (skip in dry-run)
   if (!dryRun) {
     const eas = probe('eas', ['--version']);
+    // Output: "eas-cli/16.28.0 darwin-arm64 node-v23.7.0\n...upgrade notice..."
+    const easVersion = eas.output.match(/eas-cli\/([\d.]+)/)?.[1] ?? eas.output.trim().split('\n')[0];
     checks.push({
       name: 'eas-cli',
       status: eas.ok ? 'pass' : 'fail',
-      version: eas.ok ? eas.output.trim() : undefined,
+      version: eas.ok ? easVersion : undefined,
       message: eas.ok ? undefined : 'eas-cli not found',
       fix: eas.ok ? undefined : 'Install eas-cli: npm install -g eas-cli',
     });
