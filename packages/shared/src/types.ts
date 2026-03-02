@@ -31,6 +31,22 @@ export interface Runner {
   lastHeartbeat: number;
 }
 
+/** Result of a single preflight check */
+export interface PreflightCheck {
+  name: string;
+  status: 'pass' | 'fail' | 'warn';
+  version?: string;
+  message?: string;
+  fix?: string;
+}
+
+/** Preflight summary for a single platform */
+export interface PreflightResult {
+  platform: Platform;
+  passed: boolean;
+  checks: PreflightCheck[];
+}
+
 export type SSEEvent =
   | { type: 'job:created'; job: Job }
   | { type: 'job:status'; jobId: string; status: JobStatus; error?: string; exitCode?: number; hostname?: string }

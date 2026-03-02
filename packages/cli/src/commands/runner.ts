@@ -9,6 +9,7 @@ import { loadConfig } from '../lib/config.js';
 import { createApiClient } from '../lib/api.js';
 import { connectToPlatform } from '../lib/sse-client.js';
 import type { Platform, SSEEvent, Job } from '@buildq/shared';
+import { runPreflight, printPreflightReport } from '../lib/preflight.js';
 
 const noColor = !!process.env['NO_COLOR'];
 const green = (s: string) => (noColor ? s : `\x1b[32m${s}\x1b[0m`);
@@ -49,6 +50,7 @@ export const runnerCommand = new Command('runner')
   .option('-i, --install', 'Auto-install artifact on device after build', false)
   .option('-w, --work-dir <path>', 'Working directory for builds', path.join(os.homedir(), '.buildq', 'builds'))
   .option('--dry-run', 'Simulate builds without eas-cli (for testing)', false)
+  .option('--skip-preflight', 'Skip environment preflight checks', false)
   .action(async (opts, cmd) => {
     const globalOpts = cmd.parent?.opts() ?? {};
 
@@ -65,21 +67,31 @@ export const runnerCommand = new Command('runner')
       }
     }
 
-    // Check iOS on macOS
-    if (platforms.includes('ios') && process.platform !== 'darwin') {
-      console.error(red(`\u2717 iOS builds require macOS. This machine is running ${process.platform}.`));
+    // Preflight environment checks
+    const preflight = runPreflight({
+      platforms,
+      dryRun: opts.dryRun,
+      skipPreflight: opts.skipPreflight,
+    });
+
+    if (!opts.skipPreflight) {
+      printPreflightReport(preflight);
+    }
+
+    if (preflight.validatedPlatforms.length === 0 && !opts.skipPreflight) {
+      console.error(red('\u2717 No platforms passed preflight checks. Runner cannot start.'));
+      console.error(dim('  Use --skip-preflight to bypass (not recommended).'));
       process.exit(1);
     }
 
-    // Check eas-cli (skip in dry-run mode)
-    if (!opts.dryRun) {
-      try {
-        const { execSync } = await import('node:child_process');
-        execSync('eas --version', { stdio: 'ignore' });
-      } catch {
-        console.error(red('\u2717 eas-cli is not installed. Install it with: npm install -g eas-cli'));
-        process.exit(1);
-      }
+    if (preflight.validatedPlatforms.length < platforms.length && !opts.skipPreflight) {
+      const failed = platforms.filter((p) => !preflight.validatedPlatforms.includes(p));
+      console.warn(yellow(
+        `\u26a0 Preflight failed for: ${failed.join(', ')}. ` +
+        `Runner will only accept: ${preflight.validatedPlatforms.join(', ')}`,
+      ));
+      platforms.length = 0;
+      platforms.push(...preflight.validatedPlatforms);
     }
 
     const runnerId = loadOrCreateRunnerId();
